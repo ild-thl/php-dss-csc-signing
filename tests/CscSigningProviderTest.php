@@ -114,11 +114,11 @@ final class CscSigningProviderTest extends TestCase {
         $this->assertSame('/oauth2/revoke', $client->requests[5]['path']);
     }
 
-    public function test_pkce_and_timestamp_hash_are_correct(): void {
+    public function test_timestamp_posts_json_and_decodes_the_base64_token(): void {
         $client = new FakeCscHttpClient([
             ['code' => 'authorization-code'],
             ['access_token' => 'access-token'],
-            ['timeStampToken' => 'timestamp-token'],
+            ['timeStampToken' => base64_encode('timestamp-token')],
             [],
         ]);
         $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets());
@@ -128,6 +128,8 @@ final class CscSigningProviderTest extends TestCase {
             'digestAlgorithm' => 'SHA512',
             'timestampContainerForm' => null,
         ], $provider->timestamp('document-bytes'));
+        $this->assertSame('json', $client->requests[2]['transport']);
+        $this->assertSame('/csc/v2/signatures/timestamp', $client->requests[2]['path']);
         $authorization = $client->requests[0]['data'];
         $token = $client->requests[1]['data'];
         $this->assertSame(
@@ -137,6 +139,24 @@ final class CscSigningProviderTest extends TestCase {
         $this->assertArrayNotHasKey('user-agent', $token);
         $this->assertSame(base64_encode(hash('sha512', 'document-bytes', true)), $client->requests[2]['data']['hash']);
         $this->assertSame('2.16.840.1.101.3.4.2.3', $client->requests[2]['data']['hashAlgo']);
+        $this->assertSame('/oauth2/revoke', $client->requests[3]['path']);
+    }
+
+    public function test_invalid_base64_timestamp_response_is_rejected_and_authorization_revoked(): void {
+        $client = new FakeCscHttpClient([
+            ['code' => 'authorization-code'],
+            ['access_token' => 'access-token'],
+            ['timeStampToken' => '%%%'],
+            [],
+        ]);
+        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets());
+
+        $this->expectExceptionMessage('CSC returned an invalid timestamp token.');
+        try {
+            $provider->timestamp('document-bytes');
+        } finally {
+            $this->assertSame('/oauth2/revoke', $client->requests[3]['path']);
+        }
     }
 
     public function test_empty_signature_response_fails_immediately(): void {

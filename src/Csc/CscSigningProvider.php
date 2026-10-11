@@ -17,7 +17,6 @@ final class CscSigningProvider implements
     CertificateProviderInterface,
     SigningProviderInterface,
     TimestampProviderInterface {
-
     private const SHA256_OID = '2.16.840.1.101.3.4.2.1';
 
     private const SHA512_OID = '2.16.840.1.101.3.4.2.3';
@@ -224,13 +223,17 @@ final class CscSigningProvider implements
         $hash = hash('sha512', $data, true);
         $token = $this->authorize([$hash], self::SHA512_OID);
         try {
-            $response = $this->httpClient->postForm($this->url('api_url', '/csc/v2/signatures/timestamp'), [
+            $response = $this->httpClient->postJson($this->url('api_url', '/csc/v2/signatures/timestamp'), [
                 'hash' => base64_encode($hash),
                 'hashAlgo' => self::SHA512_OID,
             ], $this->bearer($token));
-            $timestamp = $response['timeStampToken'] ?? null;
-            if (! is_string($timestamp) || $timestamp === '') {
+            $encodedTimestamp = $response['timeStampToken'] ?? null;
+            if (! is_string($encodedTimestamp) || $encodedTimestamp === '') {
                 throw new SigningException('CSC did not return a timestamp token.');
+            }
+            $timestamp = base64_decode($encodedTimestamp, true);
+            if ($timestamp === false || $timestamp === '') {
+                throw new SigningException('CSC returned an invalid timestamp token.');
             }
 
             return [

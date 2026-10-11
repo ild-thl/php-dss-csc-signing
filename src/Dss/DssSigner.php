@@ -166,7 +166,9 @@ final class DssSigner {
                 'encryptionAlgorithm' => $this->encryptionAlgorithm(),
                 'referenceDigestAlgorithm' => null,
                 'contentTimestamps' => [[
-                    'binaries' => $timestampData['bytes'] ?? throw new SigningException('Timestamp bytes are missing.'),
+                    'binaries' => base64_encode(
+                        $timestampData['bytes'] ?? throw new SigningException('Timestamp bytes are missing.')
+                    ),
                     'type' => 'DOCUMENT_TIMESTAMP',
                     'canonicalizationMethod' => null,
                     'includes' => null,
@@ -235,7 +237,7 @@ final class DssSigner {
             return $this->timestampProvider->timestamp($document);
         }
 
-        return $this->httpClient->postJson($this->url('/one-document/timestampDocument'), [
+        $response = $this->httpClient->postJson($this->url('/one-document/timestampDocument'), [
             'timestampParameters' => [
                 'digestAlgorithm' => 'SHA512',
                 'canonicalizationMethod' => 'http://www.w3.org/2001/10/xml-exc-c14n#',
@@ -243,6 +245,14 @@ final class DssSigner {
             ],
             'toTimestampDocument' => ['bytes' => base64_encode($document)],
         ]);
+        $encodedTimestamp = $response['bytes'] ?? null;
+        $timestamp = is_string($encodedTimestamp) ? base64_decode($encodedTimestamp, true) : false;
+        if ($timestamp === false || $timestamp === '') {
+            throw new SigningException('DSS returned an invalid timestamp token.');
+        }
+        $response['bytes'] = $timestamp;
+
+        return $response;
     }
 
     /** @param array<string, mixed> $response */

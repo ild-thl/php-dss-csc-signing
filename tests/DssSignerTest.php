@@ -31,7 +31,7 @@ final class DssSignerTest extends TestCase {
                 $this->calls[] = 'timestamp';
 
                 return [
-                    'bytes' => 'timestamp-token',
+                    'bytes' => "\x30\x82\x00\x80\xfftimestamp",
                     'digestAlgorithm' => 'SHA512',
                     'timestampContainerForm' => null,
                 ];
@@ -79,6 +79,11 @@ final class DssSignerTest extends TestCase {
             base64_encode('certificate'),
             base64_encode('intermediate-certificate'),
         ], $http->certificateChain);
+        $this->assertSame(
+            base64_encode("\x30\x82\x00\x80\xfftimestamp"),
+            $http->contentTimestamps[0]['binaries']
+        );
+        $this->assertNotFalse(json_encode($http->contentTimestamps, JSON_THROW_ON_ERROR));
         $this->assertSame('JSON_SERIALIZATION', $http->jwsSerializationType);
         $this->assertTrue($http->base64UrlEncodedEtsiUComponents);
         $this->assertSame('RSA_SHA256', $http->signature['algorithm']);

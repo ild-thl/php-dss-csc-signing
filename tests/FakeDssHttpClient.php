@@ -9,13 +9,23 @@ use IsyThl\Signing\Http\HttpClientInterface;
 final class FakeDssHttpClient implements HttpClientInterface {
 
     public array $dataToSignDocument = [];
+
     public array $signature = [];
+
     public array $certificateChain = [];
+
+    public array $contentTimestamps = [];
+
     public string $encryptionAlgorithm = '';
+
     public string $jwsSerializationType = '';
+
     public bool $base64UrlEncodedEtsiUComponents = false;
+
     public bool $returnEmptyDataToSign = false;
+
     public bool $returnEmptySignedDocument = false;
+
     public int $signingDate = 0;
 
     public function __construct(private array &$calls) {
@@ -29,6 +39,7 @@ final class FakeDssHttpClient implements HttpClientInterface {
     ): array {
         if (str_ends_with($url, '/timestampDocument')) {
             $this->calls[] = 'dss-timestamp';
+
             return ['bytes' => base64_encode('timestamp-token')];
         }
         if (str_ends_with($url, '/getDataToSign')) {
@@ -41,11 +52,13 @@ final class FakeDssHttpClient implements HttpClientInterface {
                 $data['parameters']['certificateChain'],
                 'encodedCertificate'
             );
+            $this->contentTimestamps = $data['parameters']['contentTimestamps'];
             $this->encryptionAlgorithm = $data['parameters']['encryptionAlgorithm'];
             $this->jwsSerializationType = $data['parameters']['jwsSerializationType'];
             $this->base64UrlEncodedEtsiUComponents =
                 $data['parameters']['base64UrlEncodedEtsiUComponents'];
             $this->signingDate = $data['parameters']['blevelParams']['signingDate'];
+
             return [
                 'bytes' => $this->returnEmptyDataToSign
                     ? ''
@@ -54,6 +67,7 @@ final class FakeDssHttpClient implements HttpClientInterface {
         }
         $this->calls[] = 'signDocument';
         $this->signature = $data['signatureValue'];
+
         return [
             'bytes' => $this->returnEmptySignedDocument
                 ? ''
