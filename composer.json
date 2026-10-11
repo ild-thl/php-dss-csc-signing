@@ -24,6 +24,7 @@
         "phpstan/phpstan": "^2.2"
     },
     "scripts": {
+        "test": "phpunit --configuration phpunit.xml",
         "lint": "find src tests -name '*.php' -print0 | xargs -0 -n1 php -l",
         "format": "phpcbf --standard=phpcs.xml src tests",
         "style": "phpcs --standard=phpcs.xml",

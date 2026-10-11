@@ -4,9 +4,10 @@ declare(strict_types=1);
 
 namespace IsyThl\Signing\Dss;
 
-use IsyThl\Signing\Exception\SigningException;
 use IsyThl\Signing\CertificateProviderInterface;
+use IsyThl\Signing\Csc\AsyncSigningProviderInterface;
 use IsyThl\Signing\DocumentValidatorInterface;
+use IsyThl\Signing\Exception\SigningException;
 use IsyThl\Signing\Http\HttpClientInterface;
 use IsyThl\Signing\SigningProviderInterface;
 use IsyThl\Signing\TimestampProviderInterface;
@@ -21,7 +22,7 @@ final class DssSigner {
     private ?CertificateProviderInterface $certificateProvider = null;
 
     /**
-     * @param callable(): int|null $clock Returns signing time in milliseconds.
+     * @param  callable(): int|null  $clock  Returns signing time in milliseconds.
      */
     public function __construct(
         private HttpClientInterface $httpClient,
@@ -35,7 +36,7 @@ final class DssSigner {
     ) {
         if (
             $serviceUrl === ''
-            || (!$this->allowInsecureTransport && parse_url($serviceUrl, PHP_URL_SCHEME) !== 'https')
+            || (! $this->allowInsecureTransport && parse_url($serviceUrl, PHP_URL_SCHEME) !== 'https')
         ) {
             throw new SigningException('DSS service URL must use HTTPS.');
         }
@@ -50,15 +51,55 @@ final class DssSigner {
             $this->certificate = $certificate;
             $this->certificateChain = [$certificate];
         }
-        $this->clock ??= static fn(): int => time() * 1000;
+        $this->clock ??= static fn (): int => time() * 1000;
     }
 
     /**
-     * @param array<string, mixed> $trustedMetadata
+     * @param  array<string, mixed>  $trustedMetadata
      */
     public function sign(string $document, array $trustedMetadata = []): string {
+        $signingData = $this->prepareSigning($document, $trustedMetadata);
+        $signature = $this->signingProvider->sign($signingData['dataToSign']);
+
+        return $this->completeSigning($signingData['requestBody'], $signature);
+    }
+
+    /**
+     * Begin a document signing operation without waiting for CSC hash signing to finish.
+     * The returned operation contains the document request and CSC access token; treat it as sensitive.
+     *
+     * @param  array<string, mixed>  $trustedMetadata
+     */
+    public function startSigning(string $document, array $trustedMetadata = []): DssSigningOperation {
+        $provider = $this->asyncSigningProvider();
+        $signingData = $this->prepareSigning($document, $trustedMetadata);
+        $operation = $provider->startSigning($signingData['dataToSign']);
+
+        return new DssSigningOperation($signingData['requestBody'], $operation);
+    }
+
+    /** Returns null while CSC is processing, or the validated signed document when complete. */
+    public function pollSigning(DssSigningOperation $operation): ?string {
+        $signature = $this->asyncSigningProvider()->pollSigning($operation->cscOperation);
+        if ($signature === null) {
+            return null;
+        }
+
+        return $this->completeSigning($operation->requestBody, $signature);
+    }
+
+    /** Revoke CSC authorization if an asynchronous document operation is abandoned. */
+    public function revokeSigningOperation(DssSigningOperation $operation): void {
+        $this->asyncSigningProvider()->revokeSigningOperation($operation->cscOperation);
+    }
+
+    /**
+     * @param  array<string, mixed>  $trustedMetadata
+     * @return array{requestBody: array<string, mixed>, dataToSign: string}
+     */
+    private function prepareSigning(string $document, array $trustedMetadata): array {
         $documentData = json_decode($document, true);
-        if (json_last_error() !== JSON_ERROR_NONE || !is_array($documentData) || array_is_list($documentData)) {
+        if (json_last_error() !== JSON_ERROR_NONE || ! is_array($documentData) || array_is_list($documentData)) {
             throw new SigningException('Document must be a JSON object.');
         }
 
@@ -71,8 +112,12 @@ final class DssSigner {
         $requestBody = $this->requestBody($serializedDocument, $timestampData);
         $dataToSignResponse = $this->httpClient->postJson($this->url('/one-document/getDataToSign'), $requestBody);
         $dataToSign = $this->decodeBytes($dataToSignResponse, 'DSS did not return data to sign.');
-        $signature = $this->signingProvider->sign($dataToSign);
 
+        return ['requestBody' => $requestBody, 'dataToSign' => $dataToSign];
+    }
+
+    /** @param array<string, mixed> $requestBody */
+    private function completeSigning(array $requestBody, string $signature): string {
         $requestBody['signatureValue'] = [
             'algorithm' => $this->signingProvider->signatureAlgorithm(),
             'value' => base64_encode($signature),
@@ -82,19 +127,29 @@ final class DssSigner {
         if ($this->validator !== null) {
             $this->validator->validate($signedDocument);
         }
+
         return $signedDocument;
     }
 
+    private function asyncSigningProvider(): AsyncSigningProviderInterface {
+        if (! $this->signingProvider instanceof AsyncSigningProviderInterface) {
+            throw new SigningException('Signing provider does not support asynchronous signing.');
+        }
+
+        return $this->signingProvider;
+    }
+
     /**
-     * @param array<string, mixed> $timestampData
+     * @param  array<string, mixed>  $timestampData
      * @return array<string, mixed>
      */
     private function requestBody(string $document, array $timestampData): array {
         $this->loadCertificateData();
+
         return [
             'parameters' => [
                 'signingCertificate' => ['encodedCertificate' => base64_encode($this->certificate)],
-                'certificateChain' => array_map(static fn(string $certificate): array => [
+                'certificateChain' => array_map(static fn (string $certificate): array => [
                     'encodedCertificate' => base64_encode($certificate),
                 ], $this->certificateChain),
                 'detachedContents' => null,
@@ -179,6 +234,7 @@ final class DssSigner {
         if ($this->timestampProvider !== null) {
             return $this->timestampProvider->timestamp($document);
         }
+
         return $this->httpClient->postJson($this->url('/one-document/timestampDocument'), [
             'timestampParameters' => [
                 'digestAlgorithm' => 'SHA512',
@@ -196,6 +252,7 @@ final class DssSigner {
         if ($decoded === false || $decoded === '') {
             throw new SigningException($message);
         }
+
         return $decoded;
     }
 

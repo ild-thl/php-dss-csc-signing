@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 - 2026-10-11
+
+- Make CSC `sign()` use synchronous signing and add explicit asynchronous
+  initiation and polling APIs.
+- Add resumable asynchronous DSS document signing with final document
+  validation and CSC access-token revocation.
+- Add tests for synchronous CSC responses and the document-level async flow.
+
 ## 0.1.2 - 2026-09-04
 
 - Added framework-independent DSS and CSC signing contracts, typed exceptions,

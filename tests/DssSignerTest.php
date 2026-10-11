@@ -4,15 +4,17 @@ declare(strict_types=1);
 
 namespace IsyThl\Signing\Tests;
 
-use IsyThl\Signing\Dss\DssSigner;
 use IsyThl\Signing\CertificateProviderInterface;
+use IsyThl\Signing\Csc\AsyncSigningProviderInterface;
+use IsyThl\Signing\Csc\CscSigningOperation;
 use IsyThl\Signing\DocumentValidatorInterface;
-use IsyThl\Signing\ValidationResult;
+use IsyThl\Signing\Dss\DssSigner;
+use IsyThl\Signing\Dss\DssSigningOperation;
 use IsyThl\Signing\Exception\SigningException;
 use IsyThl\Signing\Exception\ValidationException;
-use IsyThl\Signing\Http\HttpClientInterface;
 use IsyThl\Signing\SigningProviderInterface;
 use IsyThl\Signing\TimestampProviderInterface;
+use IsyThl\Signing\ValidationResult;
 use PHPUnit\Framework\TestCase;
 
 final class DssSignerTest extends TestCase {
@@ -20,12 +22,14 @@ final class DssSignerTest extends TestCase {
     public function test_signing_preserves_dss_bytes_and_order(): void {
         $calls = [];
         $http = new FakeDssHttpClient($calls);
-        $timestamp = new class ($calls) implements TimestampProviderInterface {
+        $timestamp = new class ($calls) implements TimestampProviderInterface
+        {
             public function __construct(private array &$calls) {
             }
 
             public function timestamp(string $document): array {
                 $this->calls[] = 'timestamp';
+
                 return [
                     'bytes' => 'timestamp-token',
                     'digestAlgorithm' => 'SHA512',
@@ -33,7 +37,8 @@ final class DssSignerTest extends TestCase {
                 ];
             }
         };
-        $provider = new class ($calls) implements SigningProviderInterface {
+        $provider = new class ($calls) implements SigningProviderInterface
+        {
             public string $input = '';
 
             public function __construct(private array &$calls) {
@@ -42,6 +47,7 @@ final class DssSignerTest extends TestCase {
             public function sign(string $data): string {
                 $this->calls[] = 'sign';
                 $this->input = $data;
+
                 return 'signature-bytes';
             }
 
@@ -49,7 +55,8 @@ final class DssSignerTest extends TestCase {
                 return 'RSA_SHA256';
             }
         };
-        $certificateProvider = new class implements CertificateProviderInterface {
+        $certificateProvider = new class implements CertificateProviderInterface
+        {
             public function certificateData(): array {
                 return [
                     'certificate' => 'certificate',
@@ -78,10 +85,100 @@ final class DssSignerTest extends TestCase {
         $this->assertSame(base64_encode('signature-bytes'), $http->signature['value']);
     }
 
+    public function test_async_signing_can_be_polled_and_finalizes_the_document(): void {
+        $calls = [];
+        $http = new FakeDssHttpClient($calls);
+        $provider = new class ($calls) implements AsyncSigningProviderInterface, SigningProviderInterface
+        {
+            public string $input = '';
+
+            private int $pollCount = 0;
+
+            public function __construct(private array &$calls) {
+            }
+
+            public function sign(string $data): string {
+                throw new \LogicException('Synchronous signing should not be used.');
+            }
+
+            public function startSigning(string $data): CscSigningOperation {
+                $this->calls[] = 'startSigning';
+                $this->input = $data;
+
+                return new CscSigningOperation('request-id', 'access-token');
+            }
+
+            public function pollSigning(CscSigningOperation $operation): ?string {
+                $this->calls[] = 'pollSigning';
+
+                return ++$this->pollCount === 1 ? null : 'signature-bytes';
+            }
+
+            public function revokeSigningOperation(CscSigningOperation $operation): void {
+                $this->calls[] = 'revokeSigningOperation';
+            }
+
+            public function signatureAlgorithm(): string {
+                return 'RSA_SHA256';
+            }
+        };
+        $timestamp = new class ($calls) implements TimestampProviderInterface
+        {
+            public function __construct(private array &$calls) {
+            }
+
+            public function timestamp(string $document): array {
+                $this->calls[] = 'timestamp';
+
+                return ['bytes' => 'timestamp-token'];
+            }
+        };
+        $validator = new class ($calls) implements DocumentValidatorInterface
+        {
+            public function __construct(private array &$calls) {
+            }
+
+            public function validate(string $signedDocument): ValidationResult {
+                $this->calls[] = 'validate';
+
+                return new ValidationResult(true, true);
+            }
+        };
+        $signer = new DssSigner(
+            $http,
+            $provider,
+            'https://dss.example',
+            'certificate',
+            $timestamp,
+            null,
+            $validator
+        );
+
+        $operation = $signer->startSigning('{"id":"credential"}', ['issuer' => ['id' => 'trusted']]);
+
+        $this->assertInstanceOf(DssSigningOperation::class, $operation);
+        $this->assertSame(['timestamp', 'getDataToSign', 'startSigning'], $calls);
+        $this->assertSame('dss-data-to-sign', $provider->input);
+        $this->assertNull($signer->pollSigning($operation));
+        $this->assertSame(['timestamp', 'getDataToSign', 'startSigning', 'pollSigning'], $calls);
+
+        $restoredOperation = unserialize(serialize($operation));
+        $this->assertInstanceOf(DssSigningOperation::class, $restoredOperation);
+        $this->assertSame('request-id', $restoredOperation->cscOperation->requestId);
+        $this->assertSame('{"signed":true}', $signer->pollSigning($restoredOperation));
+        $this->assertSame(
+            ['timestamp', 'getDataToSign', 'startSigning', 'pollSigning', 'pollSigning', 'signDocument', 'validate'],
+            $calls
+        );
+        $this->assertSame(base64_encode('signature-bytes'), $http->signature['value']);
+        $this->assertSame('trusted', $http->dataToSignDocument['issuer']['id']);
+    }
+
     public function test_invalid_json_is_rejected_before_dependencies_are_called(): void {
         $calls = [];
         $http = new FakeDssHttpClient($calls);
-        $provider = new class implements SigningProviderInterface {
+        $provider = new class implements SigningProviderInterface
+        {
             public function sign(string $data): string {
                 throw new \LogicException('must not sign');
             }
@@ -100,7 +197,8 @@ final class DssSignerTest extends TestCase {
     public function test_json_array_is_rejected_before_dependencies_are_called(): void {
         $calls = [];
         $http = new FakeDssHttpClient($calls);
-        $provider = new class implements SigningProviderInterface {
+        $provider = new class implements SigningProviderInterface
+        {
             public function sign(string $data): string {
                 throw new \LogicException('must not sign');
             }
@@ -122,7 +220,8 @@ final class DssSignerTest extends TestCase {
         $this->expectExceptionMessage('DSS service URL must use HTTPS.');
         new DssSigner(
             new FakeDssHttpClient($calls),
-            new class implements SigningProviderInterface {
+            new class implements SigningProviderInterface
+            {
                 public function sign(string $data): string {
                     return 'signature';
                 }
@@ -140,7 +239,8 @@ final class DssSignerTest extends TestCase {
         $calls = [];
         new DssSigner(
             new FakeDssHttpClient($calls),
-            new class implements SigningProviderInterface {
+            new class implements SigningProviderInterface
+            {
                 public function sign(string $data): string {
                     return 'signature';
                 }
@@ -164,12 +264,14 @@ final class DssSignerTest extends TestCase {
         $calls = [];
         $http = new FakeDssHttpClient($calls);
         $http->returnEmptyDataToSign = true;
-        $provider = new class ($calls) implements SigningProviderInterface {
+        $provider = new class ($calls) implements SigningProviderInterface
+        {
             public function __construct(private array &$calls) {
             }
 
             public function sign(string $data): string {
                 $this->calls[] = 'sign';
+
                 return 'signature';
             }
 
@@ -191,7 +293,8 @@ final class DssSignerTest extends TestCase {
     public function test_ecdsa_provider_selects_ecdsa_dss_encryption_algorithm(): void {
         $calls = [];
         $http = new FakeDssHttpClient($calls);
-        $provider = new class implements SigningProviderInterface {
+        $provider = new class implements SigningProviderInterface
+        {
             public function sign(string $data): string {
                 return 'signature';
             }
@@ -200,7 +303,8 @@ final class DssSignerTest extends TestCase {
                 return 'ECDSA_SHA256';
             }
         };
-        $timestamp = new class implements TimestampProviderInterface {
+        $timestamp = new class implements TimestampProviderInterface
+        {
             public function timestamp(string $document): array {
                 return ['bytes' => 'timestamp'];
             }
@@ -217,22 +321,25 @@ final class DssSignerTest extends TestCase {
         $http = new FakeDssHttpClient($calls);
         $signer = new DssSigner(
             $http,
-            new class implements SigningProviderInterface {
+            new class implements SigningProviderInterface
+            {
                 public function sign(string $data): string {
                     return 'signature';
                 }
+
                 public function signatureAlgorithm(): string {
                     return 'RSA_SHA256';
                 }
             },
             'https://dss.example',
             'certificate',
-            new class implements TimestampProviderInterface {
+            new class implements TimestampProviderInterface
+            {
                 public function timestamp(string $document): array {
                     return ['bytes' => 'timestamp'];
                 }
             },
-            static fn(): int => 1700000000123
+            static fn (): int => 1700000000123
         );
 
         $signer->sign('{"id":"credential"}');
@@ -242,28 +349,33 @@ final class DssSignerTest extends TestCase {
 
     public function test_signed_document_is_validated_before_it_is_returned(): void {
         $calls = [];
-        $validator = new class ($calls) implements DocumentValidatorInterface {
+        $validator = new class ($calls) implements DocumentValidatorInterface
+        {
             public function __construct(private array &$calls) {
             }
 
             public function validate(string $signedDocument): ValidationResult {
                 $this->calls[] = 'validate';
+
                 return new ValidationResult(true, true);
             }
         };
         $signer = new DssSigner(
             new FakeDssHttpClient($calls),
-            new class implements SigningProviderInterface {
+            new class implements SigningProviderInterface
+            {
                 public function sign(string $data): string {
                     return 'signature';
                 }
+
                 public function signatureAlgorithm(): string {
                     return 'RSA_SHA256';
                 }
             },
             'https://dss.example',
             'certificate',
-            new class implements TimestampProviderInterface {
+            new class implements TimestampProviderInterface
+            {
                 public function timestamp(string $document): array {
                     return ['bytes' => 'timestamp'];
                 }
@@ -282,17 +394,20 @@ final class DssSignerTest extends TestCase {
         $http->returnEmptySignedDocument = true;
         $signer = new DssSigner(
             $http,
-            new class implements SigningProviderInterface {
+            new class implements SigningProviderInterface
+            {
                 public function sign(string $data): string {
                     return 'signature';
                 }
+
                 public function signatureAlgorithm(): string {
                     return 'RSA_SHA256';
                 }
             },
             'https://dss.example',
             'certificate',
-            new class implements TimestampProviderInterface {
+            new class implements TimestampProviderInterface
+            {
                 public function timestamp(string $document): array {
                     return ['bytes' => 'timestamp'];
                 }
@@ -306,24 +421,28 @@ final class DssSignerTest extends TestCase {
 
     public function test_validation_failure_prevents_signed_document_from_being_returned(): void {
         $calls = [];
-        $validator = new class implements DocumentValidatorInterface {
+        $validator = new class implements DocumentValidatorInterface
+        {
             public function validate(string $signedDocument): ValidationResult {
                 throw new ValidationException('DSS validation rejected the signed document.');
             }
         };
         $signer = new DssSigner(
             new FakeDssHttpClient($calls),
-            new class implements SigningProviderInterface {
+            new class implements SigningProviderInterface
+            {
                 public function sign(string $data): string {
                     return 'signature';
                 }
+
                 public function signatureAlgorithm(): string {
                     return 'RSA_SHA256';
                 }
             },
             'https://dss.example',
             'certificate',
-            new class implements TimestampProviderInterface {
+            new class implements TimestampProviderInterface
+            {
                 public function timestamp(string $document): array {
                     return ['bytes' => 'timestamp'];
                 }

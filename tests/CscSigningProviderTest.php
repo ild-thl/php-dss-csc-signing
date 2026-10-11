@@ -7,8 +7,6 @@ namespace IsyThl\Signing\Tests;
 use IsyThl\Signing\Csc\CscSigningProvider;
 use IsyThl\Signing\Exception\HttpException;
 use IsyThl\Signing\Exception\SigningException;
-use IsyThl\Signing\Http\HttpClientInterface;
-use IsyThl\Signing\Security\SecretResolverInterface;
 use PHPUnit\Framework\TestCase;
 
 final class CscSigningProviderTest extends TestCase {
@@ -35,20 +33,85 @@ final class CscSigningProviderTest extends TestCase {
         $client = new FakeCscHttpClient([
             ['code' => 'authorization-code'],
             ['access_token' => 'access-token'],
-            ['responseID' => 'request-id'],
             ['signatures' => [base64_encode('signature-bytes')]],
             [],
         ]);
-        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets(), static function (): void {
-        });
+        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets());
 
         $this->assertSame('signature-bytes', $provider->sign('DSS data to sign'));
         $signRequest = $client->requests[2];
+        $this->assertSame('S', $signRequest['data']['operationMode']);
         $this->assertSame('credential-id', $signRequest['data']['credentialID']);
         $this->assertSame('profile-sign-algorithm', $signRequest['data']['signAlgo']);
         $this->assertSame(base64_encode(hash('sha256', 'DSS data to sign', true)), $signRequest['data']['hashes'][0]);
         $this->assertArrayNotHasKey('document', $signRequest['data']);
-        $this->assertSame('/oauth2/revoke', $client->requests[4]['path']);
+        $this->assertSame('/oauth2/revoke', $client->requests[3]['path']);
+        $this->assertCount(4, $client->requests);
+    }
+
+    public function test_synchronous_signing_uses_inline_signature_without_polling(): void {
+        $encodedSignature = 'MEUCIQCvBTyLfpvFg4layFlfPnhIUmg247WhkcuD5/Q4IhY04gIgX5CqT0Jx1YmaUSIXwzL+'
+            . 'ud3Rs0hNDgHZglmGbHowEhM=';
+        $client = new FakeCscHttpClient([
+            ['code' => 'authorization-code'],
+            ['access_token' => 'access-token'],
+            ['signatures' => [$encodedSignature]],
+            [],
+        ]);
+        $profile = $this->profile();
+        $provider = new CscSigningProvider($profile, $client, new FakeSecrets());
+
+        $this->assertSame(base64_decode($encodedSignature, true), $provider->sign('DSS data to sign'));
+        $this->assertSame('S', $client->requests[2]['data']['operationMode']);
+        $this->assertSame('/csc/v2/signatures/signHash', $client->requests[2]['path']);
+        $this->assertSame('/oauth2/revoke', $client->requests[3]['path']);
+        $this->assertCount(4, $client->requests);
+    }
+
+    public function test_synchronous_signing_requires_an_inline_signature(): void {
+        $client = new FakeCscHttpClient([
+            ['code' => 'authorization-code'],
+            ['access_token' => 'access-token'],
+            ['responseID' => 'request-id'],
+            [],
+        ]);
+        $profile = $this->profile();
+        $provider = new CscSigningProvider($profile, $client, new FakeSecrets());
+
+        $this->expectExceptionMessage('CSC did not return a signature.');
+        try {
+            $provider->sign('DSS data to sign');
+        } finally {
+            $this->assertSame('/oauth2/revoke', $client->requests[3]['path']);
+            $this->assertCount(4, $client->requests);
+        }
+    }
+
+    public function test_async_signing_can_be_started_and_polled_without_blocking(): void {
+        $client = new FakeCscHttpClient([
+            ['code' => 'authorization-code'],
+            ['access_token' => 'access-token'],
+            ['responseID' => 'request-id'],
+            new HttpException(
+                'HTTP request failed with status 400; provider error: invalid_request: The previous asynchronous '
+                . 'signature request has been accepted for processing, but the processing has not yet been completed.',
+                400
+            ),
+            ['signatures' => [base64_encode('signature-bytes')]],
+            [],
+        ]);
+        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets());
+
+        $operation = $provider->startSigning('DSS data to sign');
+        $this->assertSame('request-id', $operation->requestId);
+        $this->assertSame('access-token', $operation->accessToken);
+        $this->assertSame('A', $client->requests[2]['data']['operationMode']);
+        $this->assertCount(3, $client->requests);
+
+        $this->assertNull($provider->pollSigning($operation));
+        $this->assertSame('request-id', $client->requests[3]['data']['requestID']);
+        $this->assertSame('signature-bytes', $provider->pollSigning($operation));
+        $this->assertSame('/oauth2/revoke', $client->requests[5]['path']);
     }
 
     public function test_pkce_and_timestamp_hash_are_correct(): void {
@@ -58,8 +121,7 @@ final class CscSigningProviderTest extends TestCase {
             ['timeStampToken' => 'timestamp-token'],
             [],
         ]);
-        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets(), static function (): void {
-        });
+        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets());
 
         $this->assertSame([
             'bytes' => 'timestamp-token',
@@ -77,60 +139,6 @@ final class CscSigningProviderTest extends TestCase {
         $this->assertSame('2.16.840.1.101.3.4.2.3', $client->requests[2]['data']['hashAlgo']);
     }
 
-    public function test_polling_is_bounded_and_reuses_request_id(): void {
-        $client = new FakeCscHttpClient([
-            ['code' => 'authorization-code'],
-            ['access_token' => 'access-token'],
-            ['responseID' => 'request-id'],
-            new HttpException(
-                'HTTP request failed with status 400; provider error: invalid_request: The previous asynchronous '
-                . 'signature request has been accepted for processing, but the processing has not yet been completed.',
-                400
-            ),
-            new HttpException(
-                'HTTP request failed with status 400; provider error: invalid_request: The previous asynchronous '
-                . 'signature request has been accepted for processing, but the processing has not yet been completed.',
-                400
-            ),
-            [],
-        ]);
-        $profile = $this->profile();
-        $profile['poll_max_attempts'] = 2;
-        $provider = new CscSigningProvider($profile, $client, new FakeSecrets(), static function (): void {
-        });
-
-        $this->expectException(SigningException::class);
-        try {
-            $provider->sign('DSS data to sign');
-        } finally {
-            $this->assertSame('request-id', $client->requests[3]['data']['requestID']);
-            $this->assertSame('request-id', $client->requests[4]['data']['requestID']);
-            $this->assertSame('/oauth2/revoke', $client->requests[5]['path']);
-        }
-    }
-
-    public function test_pending_http_400_is_retried_until_signature_is_available(): void {
-        $client = new FakeCscHttpClient([
-            ['code' => 'authorization-code'],
-            ['access_token' => 'access-token'],
-            ['responseID' => 'request-id'],
-            new HttpException(
-                'HTTP request failed with status 400; provider error: invalid_request: The previous asynchronous '
-                . 'signature request has been accepted for processing, but the processing has not yet been completed.',
-                400
-            ),
-            ['signatures' => [base64_encode('signature-bytes')]],
-            [],
-        ]);
-        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets(), static function (): void {
-        });
-
-        $this->assertSame('signature-bytes', $provider->sign('DSS data to sign'));
-        $this->assertSame('request-id', $client->requests[3]['data']['requestID']);
-        $this->assertSame('request-id', $client->requests[4]['data']['requestID']);
-        $this->assertSame('/oauth2/revoke', $client->requests[5]['path']);
-    }
-
     public function test_empty_signature_response_fails_immediately(): void {
         $client = new FakeCscHttpClient([
             ['code' => 'authorization-code'],
@@ -139,13 +147,14 @@ final class CscSigningProviderTest extends TestCase {
             ['signatures' => []],
             [],
         ]);
-        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets(), static function (): void {
-        });
+        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets());
+        $operation = $provider->startSigning('DSS data to sign');
 
         $this->expectExceptionMessage('CSC returned an empty signature response.');
         try {
-            $provider->sign('DSS data to sign');
+            $provider->pollSigning($operation);
         } finally {
+            $provider->revokeSigningOperation($operation);
             $this->assertCount(5, $client->requests);
             $this->assertSame('/oauth2/revoke', $client->requests[4]['path']);
         }
@@ -157,18 +166,12 @@ final class CscSigningProviderTest extends TestCase {
             ['access_token' => 'access-token'],
             ['responseID' => 'request-id'],
             ['signatures' => ['']],
-            ['signatures' => ['']],
-            [],
         ]);
-        $profile = $this->profile();
-        $profile['poll_max_attempts'] = 2;
-        $profile['poll_delay_microseconds'] = 0;
-        $provider = new CscSigningProvider($profile, $client, new FakeSecrets(), static function (): void {
-        });
+        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets());
+        $operation = $provider->startSigning('DSS data to sign');
 
-        $this->expectException(SigningException::class);
-        $this->expectExceptionMessage('CSC signing polling timed out.');
-        $provider->sign('DSS data to sign');
+        $this->expectExceptionMessage('CSC returned an invalid signature.');
+        $provider->pollSigning($operation);
     }
 
     public function test_certificate_data_discovers_and_caches_the_configured_chain(): void {
@@ -178,8 +181,7 @@ final class CscSigningProviderTest extends TestCase {
             ['cert' => ['certificates' => [$this->certificateDerBase64(), $this->certificateDerBase64()]]],
             [],
         ]);
-        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets(), static function (): void {
-        });
+        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets());
 
         $certificateData = $provider->certificateData();
         $this->assertStringContainsString('-----BEGIN CERTIFICATE-----', $certificateData['certificate']);
@@ -200,8 +202,7 @@ final class CscSigningProviderTest extends TestCase {
         ]);
         $profile = $this->profile();
         $profile['certificate_sha256'] = str_repeat('0', 64);
-        $provider = new CscSigningProvider($profile, $client, new FakeSecrets(), static function (): void {
-        });
+        $provider = new CscSigningProvider($profile, $client, new FakeSecrets());
 
         $this->expectException(SigningException::class);
         $this->expectExceptionMessage('CSC certificate does not match the configured fingerprint.');
@@ -218,8 +219,7 @@ final class CscSigningProviderTest extends TestCase {
         $profile = $this->profile();
         $profile['certificate_sha256'] = '1B:76:3C:AD:D9:41:3F:0B:F6:B0:54:B4:E0:C1:D9:CE:D3:'
             . '0D:A3:60:11:E5:CF:31:FE:69:1C:0C:5B:69:A1:82';
-        $provider = new CscSigningProvider($profile, $client, new FakeSecrets(), static function (): void {
-        });
+        $provider = new CscSigningProvider($profile, $client, new FakeSecrets());
 
         $certificateData = $provider->certificateData();
 
@@ -236,8 +236,7 @@ final class CscSigningProviderTest extends TestCase {
             ]]],
             [],
         ]);
-        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets(), static function (): void {
-        });
+        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets());
 
         $this->expectException(SigningException::class);
         $this->expectExceptionMessage('CSC returned an invalid certificate chain.');
@@ -253,8 +252,7 @@ final class CscSigningProviderTest extends TestCase {
         ]);
         $profile = $this->profile();
         $profile['sign_algo'] = '1.2.840.10045.4.3.2';
-        $provider = new CscSigningProvider($profile, $client, new FakeSecrets(), static function (): void {
-        });
+        $provider = new CscSigningProvider($profile, $client, new FakeSecrets());
 
         $certificateData = $provider->certificateData();
         $this->assertStringContainsString('-----BEGIN CERTIFICATE-----', $certificateData['certificate']);
@@ -264,6 +262,7 @@ final class CscSigningProviderTest extends TestCase {
     private function certificateDerBase64(string $filename = 'test-certificate.pem'): string {
         $pem = file_get_contents(__DIR__ . '/fixtures/' . $filename);
         $der = preg_replace('/-----[^-]+-----|\s+/', '', (string) $pem);
+
         return base64_encode((string) base64_decode((string) $der, true));
     }
 
@@ -274,8 +273,7 @@ final class CscSigningProviderTest extends TestCase {
             ['cert' => ['certificates' => [base64_encode('not-a-certificate')]]],
             [],
         ]);
-        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets(), static function (): void {
-        });
+        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets());
 
         $this->expectException(SigningException::class);
         $this->expectExceptionMessage('CSC returned an invalid certificate.');
@@ -312,7 +310,6 @@ final class CscSigningProviderTest extends TestCase {
             'client_secret' => 'client_secret',
             'tls_certificate' => 'tls_certificate',
             'tls_key' => 'tls_key',
-            'poll_max_attempts' => 10,
         ];
     }
 }

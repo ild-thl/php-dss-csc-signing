@@ -104,6 +104,18 @@ $signedDocument = $signer->sign($documentJson, $trustedMetadata);
 The application should supply its own document mapper, configuration binding,
 secret storage, logging, queueing, retry policy, and audit persistence.
 
+`CscSigningProvider::sign()` always requests synchronous signing and returns the
+signature bytes directly from `signHash`. For asynchronous document signing,
+call `DssSigner::startSigning()` to timestamp the document and obtain DSS data
+to sign, then call `DssSigner::pollSigning()` from later queue jobs or scheduled
+work. Polling returns `null` while CSC is processing, or the validated signed
+document when complete. Call `DssSigner::revokeSigningOperation()` if an
+operation is abandoned; this revokes authorization but does not stop
+provider-side processing. The serializable `DssSigningOperation` contains the
+document request body and CSC access token; persist and transport it only
+through protected storage/queues. Completed operations revoke their token
+automatically.
+
 For deployments that need explicit credential-to-certificate pinning, a CSC
 profile may include `certificate_sha256` with the expected SHA-256 fingerprint
 of the leaf certificate. The provider rejects a discovered certificate that
