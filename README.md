@@ -20,6 +20,7 @@ The package currently provides:
 - DSS signing orchestration for JAdES baseline LTA documents;
 - CSC v2 hash signing, timestamping, certificate discovery, PKCE, polling, and
   access-token revocation;
+- a digest-based timestamp capability and RFC 3161 request/response bridge;
 - RSA and ECDSA signing algorithm selection;
 - certificate-chain forwarding to DSS;
 - DSS validation before a signed document is released; and
@@ -56,6 +57,28 @@ DSS and CSC endpoints use HTTPS by default, and the package rejects
 non-HTTPS endpoints during provider construction. For isolated development
 or test deployments only, DSS transport can be explicitly opted into with
 `allowInsecureTransport: true`; this option is not available for CSC.
+
+## RFC 3161 timestamp bridge
+
+`DigestTimestampProviderInterface` allows an application to timestamp an
+already-computed message imprint. `CscSigningProvider::timestampDigest()`
+implements this capability for SHA-256, SHA-384, and SHA-512 CSC requests.
+`Rfc3161TimestampBridge` accepts a DER `TimeStampReq`, forwards its digest and
+algorithm OID to that provider, and returns a DER `TimeStampResp` containing
+the normalized CMS timestamp token:
+
+```php
+$bridge = new Rfc3161TimestampBridge($csc);
+$responseDer = $bridge->respond($requestDer);
+```
+
+The bridge returns an RFC 3161 rejection response for unsupported digest
+algorithms and nonce-bearing requests. The CSC provider normalizes a CMS token
+returned directly or inside a successful `TimeStampResp`, including Base64
+wrapped provider responses. It does not choose a vendor, issuer, HTTP route,
+or authentication mechanism; applications own those boundaries. A bridge
+endpoint should be protected from public or unauthenticated use because it
+invokes a signing credential and external timestamp service.
 
 ## Requirements
 

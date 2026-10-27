@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace IsyThl\Signing\Csc;
 
 use IsyThl\Signing\CertificateProviderInterface;
+use IsyThl\Signing\DigestTimestampProviderInterface;
 use IsyThl\Signing\Exception\HttpException;
 use IsyThl\Signing\Exception\SigningException;
 use IsyThl\Signing\Http\HttpClientInterface;
@@ -15,6 +16,7 @@ use IsyThl\Signing\TimestampProviderInterface;
 final class CscSigningProvider implements
     AsyncSigningProviderInterface,
     CertificateProviderInterface,
+    DigestTimestampProviderInterface,
     SigningProviderInterface,
     TimestampProviderInterface {
     private const SHA256_OID = '2.16.840.1.101.3.4.2.1';
@@ -220,12 +222,25 @@ final class CscSigningProvider implements
         if ($data === '') {
             throw new SigningException('Cannot timestamp empty data.');
         }
-        $hash = hash('sha512', $data, true);
-        $token = $this->authorize([$hash], self::SHA512_OID);
+        return $this->timestampDigest(hash('sha512', $data, true), self::SHA512_OID);
+    }
+
+    public function timestampDigest(string $digest, string $digestAlgorithmOid): array {
+        $expectedLength = match ($digestAlgorithmOid) {
+            self::SHA256_OID => 32,
+            '2.16.840.1.101.3.4.2.2' => 48,
+            self::SHA512_OID => 64,
+            default => throw new SigningException('CSC timestamp digest algorithm is not supported.'),
+        };
+        if (strlen($digest) !== $expectedLength) {
+            throw new SigningException('CSC timestamp digest length does not match its algorithm.');
+        }
+
+        $token = $this->authorize([$digest], $digestAlgorithmOid);
         try {
             $response = $this->httpClient->postJson($this->url('api_url', '/csc/v2/signatures/timestamp'), [
-                'hash' => base64_encode($hash),
-                'hashAlgo' => self::SHA512_OID,
+                'hash' => base64_encode($digest),
+                'hashAlgo' => $digestAlgorithmOid,
             ], $this->bearer($token));
             $encodedTimestamp = $response['timeStampToken'] ?? null;
             if (! is_string($encodedTimestamp) || $encodedTimestamp === '') {
@@ -235,10 +250,15 @@ final class CscSigningProvider implements
             if ($timestamp === false || $timestamp === '') {
                 throw new SigningException('CSC returned an invalid timestamp token.');
             }
+            $timestamp = (new CscTimestampTokenNormalizer())->normalize($timestamp);
 
             return [
                 'bytes' => $timestamp,
-                'digestAlgorithm' => 'SHA512',
+                'digestAlgorithm' => match ($digestAlgorithmOid) {
+                    self::SHA256_OID => 'SHA256',
+                    '2.16.840.1.101.3.4.2.2' => 'SHA384',
+                    self::SHA512_OID => 'SHA512',
+                },
                 'timestampContainerForm' => null,
             ];
         } finally {

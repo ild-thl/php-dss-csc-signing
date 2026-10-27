@@ -7,6 +7,7 @@ namespace IsyThl\Signing\Tests;
 use IsyThl\Signing\Csc\CscSigningProvider;
 use IsyThl\Signing\Exception\HttpException;
 use IsyThl\Signing\Exception\SigningException;
+use IsyThl\Signing\Tsp\Der;
 use PHPUnit\Framework\TestCase;
 
 final class CscSigningProviderTest extends TestCase {
@@ -115,16 +116,21 @@ final class CscSigningProviderTest extends TestCase {
     }
 
     public function test_timestamp_posts_json_and_decodes_the_base64_token(): void {
+        $timestampToken = hex2bin('300f06092a864886f70d010702a0023000');
+        $timestampResponse = Der::encode(
+            0x30,
+            Der::encode(0x30, Der::encode(0x02, "\x01")) . $timestampToken
+        );
         $client = new FakeCscHttpClient([
             ['code' => 'authorization-code'],
             ['access_token' => 'access-token'],
-            ['timeStampToken' => base64_encode('timestamp-token')],
+            ['timeStampToken' => base64_encode(base64_encode($timestampResponse))],
             [],
         ]);
         $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets());
 
         $this->assertSame([
-            'bytes' => 'timestamp-token',
+            'bytes' => $timestampToken,
             'digestAlgorithm' => 'SHA512',
             'timestampContainerForm' => null,
         ], $provider->timestamp('document-bytes'));
@@ -140,6 +146,38 @@ final class CscSigningProviderTest extends TestCase {
         $this->assertSame(base64_encode(hash('sha512', 'document-bytes', true)), $client->requests[2]['data']['hash']);
         $this->assertSame('2.16.840.1.101.3.4.2.3', $client->requests[2]['data']['hashAlgo']);
         $this->assertSame('/oauth2/revoke', $client->requests[3]['path']);
+    }
+
+    public function test_timestamp_digest_forwards_the_supplied_digest_and_algorithm(): void {
+        $timestampToken = hex2bin('300f06092a864886f70d010702a0023000');
+        $client = new FakeCscHttpClient([
+            ['code' => 'authorization-code'],
+            ['access_token' => 'access-token'],
+            ['timeStampToken' => base64_encode((string) $timestampToken)],
+            [],
+        ]);
+        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets());
+        $digest = hash('sha384', 'content', true);
+
+        $result = $provider->timestampDigest($digest, '2.16.840.1.101.3.4.2.2');
+
+        $this->assertSame($timestampToken, $result['bytes']);
+        $this->assertSame('SHA384', $result['digestAlgorithm']);
+        $this->assertSame(base64_encode($digest), $client->requests[2]['data']['hash']);
+        $this->assertSame('2.16.840.1.101.3.4.2.2', $client->requests[2]['data']['hashAlgo']);
+        $this->assertSame('2.16.840.1.101.3.4.2.2', $client->requests[0]['data']['hashAlgorithmOID']);
+    }
+
+    public function test_timestamp_digest_rejects_mismatched_digest_length_before_network_request(): void {
+        $client = new FakeCscHttpClient([]);
+        $provider = new CscSigningProvider($this->profile(), $client, new FakeSecrets());
+
+        $this->expectExceptionMessage('CSC timestamp digest length does not match its algorithm.');
+        try {
+            $provider->timestampDigest('short', '2.16.840.1.101.3.4.2.1');
+        } finally {
+            $this->assertCount(0, $client->requests);
+        }
     }
 
     public function test_invalid_base64_timestamp_response_is_rejected_and_authorization_revoked(): void {
