@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.1 - 2026-10-27
+
+- Map DSS 6.5 validation report DTOs into the strict qualified issuance policy.
+- Support an explicit unqualified mode while keeping signature, revocation, and
+  timestamp checks mandatory; the strict policy remains the default.
+- Include failed qualified-issuance policy gate names in validation errors
+  without logging or exposing the underlying validation report.
+- Bind certificate qualification, revocation, timestamps, and trusted-list
+  evidence to the signing certificate and fail closed when evidence is missing
+  or unrelated.
+- Add DSS 6.5 DTO mapping and fail-closed regression tests.
+
 ## 0.2.0 - 2026-10-27
 
 - Add a provider-neutral digest timestamp contract and RFC 3161 request/response
